@@ -3,4 +3,3 @@ ollama
 nselib
 pandas_market_calendars
 kaleido
-upgrade pip
