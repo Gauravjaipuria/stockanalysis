@@ -2,3 +2,4 @@ plotly
 ollama
 nselib
 pandas_market_calendars
+U kaleido
