@@ -1,87 +1,102 @@
 import streamlit as st
 import pandas as pd
-import plotly.graph_objects as go
-import openai
-import tempfile
-import base64
-import os
-import pandas_market_calendars as mcal
-from nselib import capital_market
+import numpy as np
+import yfinance as yf
+import matplotlib.pyplot as plt
+import seaborn as sns
+from xgboost import XGBRegressor
+from sklearn.ensemble import RandomForestRegressor
+from datetime import datetime, timedelta
 
-# 🏗️ Set up Streamlit app
-st.set_page_config(layout="wide")
-st.title("📈 AI-Powered Technical Stock Analysis Dashboard")
-st.sidebar.header("⚙️ Configuration")
+# Streamlit UI
+st.title("📈 AI-Powered Stock Portfolio Optimizer")
 
-# 📅 User Input for Stock Ticker & Date Range
-ticker = st.sidebar.text_input("Enter NSE Stock Ticker (e.g., VEDL):", "VEDL").upper()
-start_date = st.sidebar.date_input("Start Date", pd.to_datetime("2023-01-01"))
-end_date = st.sidebar.date_input("End Date", pd.to_datetime("2024-12-31"))
+# Country Selection
+country = st.radio("Select Market:", ["India", "US"])
 
-# 🔄 Convert date format to match NSE API requirements
-start_date_str = start_date.strftime("%d-%m-%Y")  # Format: "DD-MM-YYYY"
-end_date_str = end_date.strftime("%d-%m-%Y")      # Format: "DD-MM-YYYY"
+# User Inputs
+selected_stocks = st.text_input("Enter stock symbols (comma-separated):").strip().upper().split(',')
+selected_stocks = [stock.strip() + ".NS" if country == "India" else stock.strip() for stock in selected_stocks if stock]
 
-# 📥 Fetch stock data when button is clicked
-if st.sidebar.button("Fetch Data"):
-    try:
-        st.info("Fetching stock data... Please wait.")
-        stock_data = capital_market.price_volume_and_deliverable_position_data(
-            symbol=ticker, from_date=start_date_str, to_date=end_date_str
-        )
+years_to_use = st.number_input("Enter number of years for historical data:", min_value=1, max_value=10, value=2)
+forecast_days = st.number_input("Enter forecast period (in days):", min_value=1, max_value=365, value=30)
+investment_amount = st.number_input("Enter total investment amount (₹):", min_value=1000.0, value=50000.0)
+risk_profile = st.radio("Select your risk level:", [1, 2, 3], format_func=lambda x: {1: "Low", 2: "Medium", 3: "High"}[x])
 
-        if stock_data.empty:
-            st.error("⚠️ No data found. Please check the stock symbol and date range.")
-        else:
-            st.session_state["stock_data"] = stock_data
-            st.success("✅ Stock data loaded successfully!")
-    except Exception as e:
-        st.error(f"❌ Error fetching NSE data: {e}")
+# Initialize Storage
+forecasted_prices = {}
+volatilities = {}
+news_results = {}
+backtest_results = {}
+sector_allocation = {}
 
-# ✅ Check if stock data is available
-if "stock_data" in st.session_state and not st.session_state["stock_data"].empty:
-    data = st.session_state["stock_data"]
+def fetch_yahoo_news(stock):
+    ticker = yf.Ticker(stock)
+    return ticker.news
 
-    # 🎨 Plot candlestick chart
-    fig = go.Figure(data=[
-        go.Candlestick(
-            x=pd.to_datetime(data['Date']),
-            open=data['OpenPrice'],
-            high=data['HighPrice'],
-            low=data['LowPrice'],
-            close=data['ClosePrice'],
-            name="Candlestick"
-        )
-    ])
+def backtest_strategy(df):
+    df['Returns'] = df['Close'].pct_change()
+    cumulative_return = (1 + df['Returns']).cumprod()
+    return cumulative_return.iloc[-1] - 1  # Total return over period
 
-    st.plotly_chart(fig, use_container_width=True)
+for stock in selected_stocks:
+    df = yf.download(stock, period=f"{years_to_use}y", interval="1d", auto_adjust=True)
+    
+    if df.empty:
+        st.warning(f"Skipping {stock}: No valid data available.")
+        continue
+    
+    df['Returns'] = df['Close'].pct_change()
+    df.dropna(inplace=True)
+    
+    # Fetch Latest News
+    news_results[stock] = fetch_yahoo_news(stock)
+    
+    # Backtesting
+    backtest_results[stock] = backtest_strategy(df)
+    
+    # Train XGBoost Model
+    df['Lag_1'] = df['Close'].shift(1)
+    df.dropna(inplace=True)
+    train_size = int(len(df) * 0.8)
+    train, test = df.iloc[:train_size], df.iloc[train_size:]
+    xgb_model = XGBRegressor(objective='reg:squarederror', n_estimators=100)
+    xgb_model.fit(train[['Lag_1']], train['Close'])
+    future_xgb = [xgb_model.predict(np.array([[df['Lag_1'].iloc[-1]]]).reshape(1, -1))[0] for _ in range(forecast_days)]
+    
+    forecasted_prices[stock] = future_xgb[-1]
+    volatilities[stock] = float(np.std(df['Returns']))
+    
+    # Plot Historical Prices
+    st.subheader(f"📊 Forecast for {stock}")
+    plt.figure(figsize=(14, 7))
+    sns.set_style("darkgrid")
+    plt.plot(df.index, df['Close'], label=f'{stock} Historical', linewidth=2, color='black')
+    plt.plot(df.index[-forecast_days:], future_xgb, label=f'{stock} Forecasted (XGBoost)', linestyle='dashed', color='red')
+    plt.legend()
+    plt.title(f"Historical and Forecasted Prices for {stock}")
+    plt.xlabel("Date")
+    plt.ylabel("Close Price")
+    st.pyplot(plt)
 
-    # 🤖 AI-Powered Chart Analysis
-    st.subheader("🤖 AI-Powered Technical Analysis")
-    if st.button("Run AI Analysis"):
-        with st.spinner("🔍 Analyzing the chart, please wait..."):
-            # 📸 Save chart as an image
-            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmpfile:
-                fig.write_image(tmpfile.name)
-                tmpfile_path = tmpfile.name
+# Display Latest News
+if news_results:
+    st.subheader("📰 Latest Stock Market News")
+    for stock, articles in news_results.items():
+        st.write(f"### {stock}")
+        for article in articles[:3]:  # Show top 3 news articles
+            st.write(f"🔹 [{article['title']}]({article['link']}) - {article['publisher']}")
 
-            # 🔄 Convert Image to Base64
-            with open(tmpfile_path, "rb") as image_file:
-                image_data = base64.b64encode(image_file.read()).decode('utf-8')
+# Display Backtesting Results
+if backtest_results:
+    st.subheader("📉 Backtesting Results")
+    backtest_df = pd.DataFrame.from_dict(backtest_results, orient='index', columns=['Total Return'])
+    st.table(backtest_df)
 
-            # 📩 AI Model Request using OpenAI
-            response = openai.ChatCompletion.create(
-                model="gpt-4-vision-preview",
-                messages=[
-                    {"role": "system", "content": "You are a financial analyst specializing in technical stock analysis."},
-                    {"role": "user", "content": "Analyze the stock chart and technical indicators. Provide a buy/hold/sell recommendation with reasoning."}
-                ],
-                max_tokens=500
-            )
+# Display Sector-Wise Diversification
+if sector_allocation:
+    st.subheader("📊 Sector-Wise Diversification Analysis")
+    sector_df = pd.DataFrame.from_dict(sector_allocation, orient='index', columns=['Allocation (%)'])
+    st.table(sector_df)
 
-            # 📌 Display AI Analysis Result
-            st.write("**📌 AI Analysis Results:**")
-            st.write(response["choices"][0]["message"]["content"])
-
-            # 🧹 Clean up temporary file
-            os.remove(tmpfile_path)
+st.success("✅ Features Integrated: AI Forecasting, Market News, Risk Analysis, Backtesting, and Diversification Analysis!")
