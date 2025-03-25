@@ -1,5 +1,8 @@
-plotly
-openai
-nselib
-pandas_market_calendars
-kaleido
+streamlit
+pandas
+numpy
+yfinance
+matplotlib
+seaborn
+xgboost
+scikit-learn
